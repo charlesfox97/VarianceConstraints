@@ -9,6 +9,8 @@ import pulp
 
 import time
 
+_test_link = r'https://web.stanford.edu/~hastie/CASI_files/DATA/'
+
 
 class VarianceConstraints:
 
@@ -89,7 +91,7 @@ class VarianceConstraints:
         Parameters
         ----------
         x_vals : np.ndarray, optional
-            The set of x values to test.  Defaults to values of self.X, 
+            The set of x values to test.  Defaults to values of self.X,
             the X variables.
 
         Returns
@@ -106,7 +108,7 @@ class VarianceConstraints:
         problem = pulp.LpProblem("test")
         problem.objective = self.variance_variable
 
-        # The only constraints of the new problem are the ones used for 
+        # The only constraints of the new problem are the ones used for
         # estimating variance.
         for c in self.constraints:
             problem += c
@@ -129,7 +131,7 @@ class VarianceConstraints:
 
         Components are sorted by contribution to error.  If the total
         contribution to error of two or more components is less than cutoff,
-        one constraint is generated to estimate the variance contribution of 
+        one constraint is generated to estimate the variance contribution of
         the group of components.  One new constraint is generated for each
         component not belonging to the group of small error contributors.
 
@@ -138,7 +140,7 @@ class VarianceConstraints:
         ----------
         cutoff : float, optional
             Determines the maximum total error contributed by components that
-            are consolidated into a single constraint.  An arbitrarily large 
+            are consolidated into a single constraint.  An arbitrarily large
             value for cutoff will cause this function to generate only a single
             constraint.  A zero cutoff will cause the function to create
             one constraint per component with a non-zero contribution to error.
@@ -152,12 +154,12 @@ class VarianceConstraints:
 
         def remainder_covar(ix_components, vectors, variance_explained):
             """
-            Calculate covariance matrix of low error components.  
+            Calculate covariance matrix of low error components.
 
             Parameters
             ----------
             ix_components : np.ndarray(int)
-                Which components have a low contribution to error.  If all 
+                Which components have a low contribution to error.  If all
                 components are listed in ix_components, the original
                 covariance matrix is returned.
 
@@ -258,7 +260,7 @@ class VarianceConstraints:
 
     @property
     def constraints(self):
-        _constraints= [self.total_constraint]
+        _constraints = [self.total_constraint]
 
         for ic in self.rc:
             lc = self.components[ic].constraints
@@ -293,10 +295,10 @@ class Component:
             vector: the component's eigenvector
             X: a list of LpVariables corresponding to the vector
             number: an identifying number
-        
+
         Properties:
-            
-        
+
+
         """
         sn = str(number)
         self.contrib_variable = pulp.LpVariable("component_contrib_"+sn)
@@ -311,206 +313,198 @@ class Component:
         self.loads = {}
         self.add_estimate(0)
 
-
-    def add_estimate(self,load):
-        c= pulp.LpConstraint(
-                self.contrib_variable - 
+    def add_estimate(self, load):
+        c = pulp.LpConstraint(
+                self.contrib_variable -
                 2*self.variance_explained*load*(
                     sum([self.vector[ix]*self.X[ix] for ix in self.rx])),
-                rhs = -load**2*self.variance_explained,sense=1)
-        
+                rhs=-load**2*self.variance_explained, sense=1)
+
         self.loads[load] = c
         return c
-    
-        
-    def calc_load(self,x):
-        xs = np.reshape(x,(1,-1))
-        return np.dot(xs,self.vector)[0]
-    
-    @property 
+
+    def calc_load(self, x):
+        xs = np.reshape(x, (1, -1))
+        return np.dot(xs, self.vector)[0]
+
+    @property
     def x(self):
-        _x  = np.zeros(self.nx)
+        _x = np.zeros(self.nx)
         for ix in self.rx:
             _x[ix] = self.X[ix].value()
         return _x
-        
-    
+
     @property
     def contrib_estimated(self):
         return self.contrib_variable.value()
-    
+
     @property
     def contrib_true(self):
         return self.variance_explained*self.load**2
-    
+
     @property
     def error(self):
         return self.contrib_true - self.contrib_estimated
-    
+
     @property
     def load(self):
         return self.calc_load(self.x)
-    
+
     @property
     def constraints(self):
 
         return self.loads.values()
 
 
-def decompose(covar,min_to_keep = 10**-20):
-    e_vals,e_vectors = np.linalg.eigh(covar)
-    idx = e_vals.argsort()[::-1]   
+def decompose(covar, min_to_keep=10**-20):
+    e_vals, e_vectors = np.linalg.eigh(covar)
+    idx = e_vals.argsort()[::-1]
     e_vals = e_vals[idx]
-    e_vectors = e_vectors[:,idx]
+    e_vectors = e_vectors[:, idx]
     keep = e_vals > min_to_keep
     e_vals = e_vals[keep]
-    e_vectors = e_vectors[:,keep]
+    e_vectors = e_vectors[:, keep]
 
-    return np.atleast_2d(e_vals).T ,e_vectors
+    return np.atleast_2d(e_vals).T, e_vectors
+
 
 def ols_from_cov(covar):
 
-    return np.matmul(covar[-1,:-1],np.linalg.inv(covar[:-1,:-1]))
-    
-                    
+    return np.matmul(covar[-1, :-1], np.linalg.inv(covar[:-1, :-1]))
 
-                        
-def test(n_vars=10,n_select=3,n_obs=100,max_error = 0.05):
+
+def test(n_vars=10, n_select=3, n_obs=100, max_error=0.05):
     arb_large = 1/n_select
-    
+
     def test_data():
         try:
             data = pd.read_csv('leukemia_big.csv')
-        except:
-            data = pd.read_csv('https://web.stanford.edu/~hastie/CASI_files/DATA/leukemia_big.csv')
+        except FileNotFoundError:
+            data = pd.read_csv(_test_link+'leukemia_big.csv')
         x = data.values
         y = np.matrix(['ALL' in c for c in data.columns])*1
-        return x,y
-    
-    x,y = test_data()
-    x = x[:,:n_obs]
-    y= y[:,:n_obs]
-    x = x - np.repeat(np.atleast_2d(np.mean(x,1)).T,x.shape[1],axis=1)
+        return x, y
+
+    x, y = test_data()
+    n_obs = min(n_obs,x.shape[1])
+    x = x[:, :n_obs]
+    y = y[:, :n_obs]
+    x = x - np.repeat(np.atleast_2d(np.mean(x, 1)).T, n_obs, axis=1)
     y = y - np.mean(y)
-    
-    x = x / np.repeat(np.atleast_2d(np.std(x,1,ddof=1)).T,x.shape[1],axis=1) 
-    y = y / np.std(y,ddof=1)
-    
-    data = np.concatenate((x[:n_vars,:],y))
+
+    x = x / np.repeat(np.atleast_2d(np.std(x, 1, ddof=1)).T, n_obs, axis=1)
+    y = y / np.std(y, ddof=1)
+
+    data = np.concatenate((x[:n_vars, :], y))
     covar = np.cov(data)
 
     nx = covar.shape[0]
     X = [pulp.LpVariable("x_"+str(i)) for i in range(nx)]
-    
+
     problem = pulp.LpProblem("best_subset")
     variance_variable = pulp.LpVariable("VarianceEstimate")
     problem.setObjective(variance_variable)
     problem += pulp.LpConstraint(X[-1],rhs=-1,name="def_of_y")
     problem += pulp.LpConstraint(variance_variable,sense=-1,rhs=1,name="variance_cap")
-    
+
     cnz = pulp.LpVariable("count_non_zero")
-    problem +=  pulp.LpConstraint(cnz,sense=-1,rhs=n_select,name="count_non_zero_cap")
-    def_cnz = pulp.LpConstraint(cnz,sense=1,name="def_count_non_zero")
+    problem += pulp.LpConstraint(cnz, sense=-1, rhs=n_select,
+                                 name="count_non_zero_cap")
+
+    def_cnz = pulp.LpConstraint(cnz, sense=1, name="def_count_non_zero")
     problem += def_cnz
-    
+
     for ix in range(nx-1):
         six = str(ix)
         xnz = pulp.LpVariable("X_non_zero_" + six,
-                              cat="Integer",lowBound=0,upBound=1)
-        def_cnz.addterm(xnz,-1)
-        
-    def define_non_zero(problem,X,arb_large):
+                              cat="Integer", lowBound=0, upBound=1)
+        def_cnz.addterm(xnz, -1)
+
+    def define_non_zero(problem, X, arb_large):
         pvd = problem.variablesDict()
-        
+
         for ix in range(len(X)-1):
             six = str(ix)
-        
+
             if "xp_" + six in problem.constraints:
                 problem.constraints.pop("xp_"+six)
                 problem.constraints.pop("xn_"+six)
-            
+
             xnz = pvd["X_non_zero_"+six]
             problem += pulp.LpConstraint(xnz*arb_large - X[ix],
-                                         sense=1,name="xp_"+six)
-            
+                                         sense=1, name="xp_"+six)
+
             problem += pulp.LpConstraint(-xnz*arb_large - X[ix],
-                                         sense=-1,name="xn_"+six)
-            
-        
-    define_non_zero(problem,X,arb_large)
-    ve  = VarianceConstraints(covar,variance_variable,X)
-    
-    
-    ve.add_constraints_at_value(np.zeros((1,nx)))
+                                         sense=-1, name="xn_"+six)
+
+    define_non_zero(problem, X, arb_large)
+    ve = VarianceConstraints(covar, variance_variable, X)
+
     y_alone = np.zeros((nx))
     y_alone[-1] = 1
-    ve.test_point(y_alone)
-    ve.add_at_value(cutoff=max_error/2,problem=problem)
 
-    if False:   
+    ve.build_constraints_at_value(cutoff=max_error/2,
+                                  x_vals=y_alone,
+                                  problem=problem)
+
+    if False:
         ve.add_constraints_at_value(y_alone)
         ve.add_constraints_at_value(-y_alone)
-    
+
     for c in ve.constraints:
-        problem+= c
-    
+        problem += c
+
     start_time = time.time()
-    
+
     problem.solve()
     print(time.time()-start_time)
     bgst = np.max(abs(ve.x[:-1]))
     while (ve.error > max_error) or (bgst >= arb_large*0.5):
 
-        
         problem.constraints["variance_cap"].changeRHS(ve.variance_true)
-        nz = abs(ve.x)>0
-        
-        nz =  np.where(nz)[0]
+        nz = abs(ve.x) > 0
+
+        nz = np.where(nz)[0]
         x_base = ve.x
-        xstar = ols_from_cov(ve.covar[nz,:][:,nz])
+        xstar = ols_from_cov(ve.covar[nz, :][:, nz])
         x_star = np.zeros(ve.nx)
         x_star[nz[:-1]] = xstar
         x_star[-1] = -1
-        
-        ve.test_point(x_star)
-        ve.add_at_value(cutoff=max_error/2,problem=problem)
+
+        ve.calc_estimate_at_point(x_star)
+        ve.build_constraints_at_value(cutoff=max_error/2, problem=problem)
         print(time.time()-start_time)
-        new_estimate = ve.test_point(x_base)
-        
+        new_estimate = ve.calc_estimate_at_point(x_base)
+
         if (new_estimate+max_error) <= ve.variance_true:
-            ve.add_at_value(cutoff=max_error/2,problem=problem)
-        
-        
+            ve.build_constraints_at_value(cutoff=max_error/2, problem=problem)
+
         if bgst >= arb_large*0.5:
-            arb_large = max(bgst * (2.01**0.5),arb_large*1.1)
-            define_non_zero(problem,X,arb_large)
+            arb_large = max(bgst*(2.01**0.5), arb_large*1.1)
+            define_non_zero(problem, X, arb_large)
             print("expanded arb large to " + str(arb_large))
-            
-            
+
         problem.solve()
         bgst = np.max(abs(ve.x[:-1]))
-        print("\ntime: " + str(np.round(time.time()-start_time,1)))
-        print("\tErr: " + str(np.round(ve.error,4)))
-        print("\tTrue Variance: " + str(np.round(ve.variance_true,4)))
-    print("\tConstraints: " +str(len(problem.constraints)))
-        
-    
-    return ve,problem,data
+        print("\ntime: " + str(np.round(time.time()-start_time, 1)))
+        print("\tErr: " + str(np.round(ve.error, 4)))
+        print("\tTrue Variance: " + str(np.round(ve.variance_true, 4)))
+    print("\tConstraints: " + str(len(problem.constraints)))
+
+    return ve, problem, data
 
 
-    
-if __name__== "__main__":
-    ve,problem,data = test(n_vars=15,n_select=5,max_error=0.01)
-    
-    
-    
+if __name__ == "__main__":
+    ve, problem, data = test(n_vars=15, n_select=5, max_error=0.01)
 
-     
 
-    
-    
-    
-    
-    
-    
-    
+
+
+
+
+
+
+
+
+
+
