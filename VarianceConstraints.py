@@ -9,7 +9,7 @@ import pulp
 
 import time
 
-_test_link = r'https://web.stanford.edu/~hastie/CASI_files/DATA/'
+
 
 
 class VarianceConstraints:
@@ -84,7 +84,6 @@ class VarianceConstraints:
 
         self.remainder_constraints = []
         self.remainder_covars = []
-
 
     def calc_variance_true(self, x_vals):
         x = np.atleast_2d(x_vals)
@@ -236,13 +235,31 @@ class VarianceConstraints:
 
         return new_c
 
+    def build_constraints_at_subset_regression(self, cutoff=None,
+                                               problem=None):
+
+        # Identify which variables are non-zero
+        nz = np.where(abs(self.x) > 0)[0]
+
+        # Use ordinary least squares with the non-zero variables to find the
+        # optimal weighting for this set.
+        xstar = ols_from_cov(self.covar[nz, :][:, nz])
+        x_star = np.zeros(self.nx)
+        x_star[nz[:-1]] = xstar
+        x_star[-1] = -1
+
+        # Build constraints around the optimal weighting.
+        self.build_constraints_at_value(cutoff=cutoff, problem=problem,
+                                        x_vals=x_star)
+
+        return self.calc_variance_true(x_star), x_star
+
     @property
     def variance_estimated(self):
         return sum([self.components[ic].contrib_estimated for ic in self.rc])
 
     @property
     def variance_true(self):
-        
         x = np.atleast_2d(self.x)
         return float(np.matmul(x, np.matmul(self.covar, x.T)))
 
@@ -379,284 +396,6 @@ def ols_from_cov(covar):
     # the last column of covar is Y
     return np.matmul(covar[-1, :-1], np.linalg.inv(covar[:-1, :-1]))
 
-def test_cnz(n_vars=10, n_select=3, n_obs=100, max_error=0.05):
-    arb_large = 2
 
-    def test_data():
-        try:
-            data = pd.read_csv('leukemia_big.csv')
-        except FileNotFoundError:
-            data = pd.read_csv(_test_link+'leukemia_big.csv')
-        x = data.values
-        y = np.matrix(['ALL' in c for c in data.columns])*1
-        return x, y
-
-    x, y = test_data()
-    n_obs = min(n_obs, x.shape[1])
-    x = x[:, :n_obs]
-    y = y[:, :n_obs]
-    x = x - np.repeat(np.atleast_2d(np.mean(x, 1)).T, n_obs, axis=1)
-    y = y - np.mean(y)
-
-    x = x / np.repeat(np.atleast_2d(np.std(x, 1, ddof=1)).T, n_obs, axis=1)
-    y = y / np.std(y, ddof=1)
-
-    data = np.concatenate((x[:n_vars, :], y))
-    covar = np.cov(data)
-
-    nx = covar.shape[0]
-    X = [pulp.LpVariable("x_"+str(i)) for i in range(nx)]
-
-    problem = pulp.LpProblem("best_subset")
-    variance_variable = pulp.LpVariable("VarianceEstimate")
-    
-    problem += pulp.LpConstraint(X[-1],rhs=-1,name="def_of_y")
-    problem += pulp.LpConstraint(variance_variable,sense=-1,rhs=1,name="variance_cap")
-
-    cnz = pulp.LpVariable("count_non_zero")
-    problem += pulp.LpConstraint(cnz, rhs=n_select,
-                                 name="count_non_zero_cap")
-
-    def_cnz = pulp.LpConstraint(cnz, sense=1, name="def_count_non_zero")
-    problem += def_cnz
-
-    for ix in range(nx-1):
-        six = str(ix)
-        xnz = pulp.LpVariable("X_non_zero_" + six,
-                              cat="Integer", lowBound=0, upBound=1)
-        def_cnz.addterm(xnz, -1)
-
-    def define_non_zero(problem, X, arb_large):
-        pvd = problem.variablesDict()
-
-        for ix in range(len(X)-1):
-            six = str(ix)
-
-            if "xp_" + six in problem.constraints:
-                problem.constraints.pop("xp_"+six)
-                problem.constraints.pop("xn_"+six)
-
-            xnz = pvd["X_non_zero_"+six]
-            problem += pulp.LpConstraint(xnz*arb_large - X[ix],
-                                         sense=1, name="xp_"+six)
-
-            problem += pulp.LpConstraint(-xnz*arb_large - X[ix],
-                                         sense=-1, name="xn_"+six)
-
-    define_non_zero(problem, X, arb_large)
-    ve = VarianceConstraints(covar, variance_variable, X)
-
-    y_alone = np.zeros((nx))
-    y_alone[-1] = 1
-
-    ve.build_constraints_at_value(cutoff=max_error/2,
-                                  x_vals=y_alone,
-                                  problem=problem)
-
-    for c in ve.constraints:
-        problem += c
-
-    start_time = time.time()
-
-    best = 1
-    impossible = 0
-    problem.setObjective(cnz)
-    while (best-impossible) > max_error:
-        print("Gap: " + str(best-impossible))
-        var_cap = (best+impossible)/2
-        problem.constraints["variance_cap"].changeRHS(var_cap)
-        r = problem.solve()
-        if r == -1:
-            impossible = var_cap
-            print("infeasible")
-            continue
-        if not(r==1):
-            raise Exception("unexpected r value: " + str(r))
-
-        nz = abs(ve.x) > 0
-        nz = np.where(nz)[0]
-        x_base = ve.x
-        
-        # Use ordinary least squares with the non-zero variables to find the 
-        # optimal weighting for this set.
-        xstar = ols_from_cov(ve.covar[nz, :][:, nz])
-        x_star = np.zeros(ve.nx)
-        x_star[nz[:-1]] = xstar
-        x_star[-1] = -1
-
-        # Build constraints around the optimal weighting.
-        ve.build_constraints_at_value(cutoff=max_error, problem=problem,
-                                      x_vals=x_star)
-        x_star_variance = ve.calc_variance_true(x_star)
-        best = min(best,x_star_variance)
-
-        new_estimate = ve.calc_estimate_at_point(x_base)
-
-        if (new_estimate+max_error) <= x_star_variance:
-            ve.build_constraints_at_value(cutoff=max_error, problem=problem)
-
-        print("\ntime: " + str(np.round(time.time()-start_time, 1)))
-        print("\tConstraints: " + str(len(problem.constraints)))
-        print("\tBest: " + str(best))
-        
-    return ve, problem, data
-
-def test(n_vars=10, n_select=3, n_obs=100, max_error=0.05):
-    arb_large = 1/n_select
-
-    def test_data():
-        try:
-            data = pd.read_csv('leukemia_big.csv')
-        except FileNotFoundError:
-            data = pd.read_csv(_test_link+'leukemia_big.csv')
-        x = data.values
-        y = np.matrix(['ALL' in c for c in data.columns])*1
-        return x, y
-
-    x, y = test_data()
-    n_obs = min(n_obs, x.shape[1])
-    x = x[:, :n_obs]
-    y = y[:, :n_obs]
-    x = x - np.repeat(np.atleast_2d(np.mean(x, 1)).T, n_obs, axis=1)
-    y = y - np.mean(y)
-
-    x = x / np.repeat(np.atleast_2d(np.std(x, 1, ddof=1)).T, n_obs, axis=1)
-    y = y / np.std(y, ddof=1)
-
-    data = np.concatenate((x[:n_vars, :], y))
-    covar = np.cov(data)
-
-    nx = covar.shape[0]
-    X = [pulp.LpVariable("x_"+str(i)) for i in range(nx)]
-
-    problem = pulp.LpProblem("best_subset")
-    variance_variable = pulp.LpVariable("VarianceEstimate")
-    
-    problem += pulp.LpConstraint(X[-1],rhs=-1,name="def_of_y")
-    problem += pulp.LpConstraint(variance_variable,sense=-1,rhs=1,name="variance_cap")
-
-    cnz = pulp.LpVariable("count_non_zero")
-    problem.setObjective(variance_variable)
-    problem += pulp.LpConstraint(cnz, sense=-1, rhs=n_select,
-                                 name="count_non_zero_cap")
-
-    def_cnz = pulp.LpConstraint(cnz, sense=1, name="def_count_non_zero")
-    problem += def_cnz
-
-    for ix in range(nx-1):
-        six = str(ix)
-        xnz = pulp.LpVariable("X_non_zero_" + six,
-                              cat="Integer", lowBound=0, upBound=1)
-        def_cnz.addterm(xnz, -1)
-
-    def define_non_zero(problem, X, arb_large):
-        pvd = problem.variablesDict()
-
-        for ix in range(len(X)-1):
-            six = str(ix)
-
-            if "xp_" + six in problem.constraints:
-                problem.constraints.pop("xp_"+six)
-                problem.constraints.pop("xn_"+six)
-
-            xnz = pvd["X_non_zero_"+six]
-            problem += pulp.LpConstraint(xnz*arb_large - X[ix],
-                                         sense=1, name="xp_"+six)
-
-            problem += pulp.LpConstraint(-xnz*arb_large - X[ix],
-                                         sense=-1, name="xn_"+six)
-
-    define_non_zero(problem, X, arb_large)
-    ve = VarianceConstraints(covar, variance_variable, X)
-
-    y_alone = np.zeros((nx))
-    y_alone[-1] = 1
-
-    ve.build_constraints_at_value(cutoff=max_error/2,
-                                  x_vals=y_alone,
-                                  problem=problem)
-
-    for c in ve.constraints:
-        problem += c
-
-    start_time = time.time()
-
-    problem.solve()
-    print(time.time()-start_time)
-    bgst = np.max(abs(ve.x[:-1]))
-    est = ve.variance_estimated
-    best_found = ve.variance_true
-
-    while (ve.error > max_error) or (bgst >= arb_large*0.5):
-
-        problem.constraints["variance_cap"].changeRHS(best_found-max_error)
-
-        # Identify which variables are non-zero
-        nz = abs(ve.x) > 0
-        nz = np.where(nz)[0]
-        x_base = ve.x
-        
-        # Use ordinary least squares with the non-zero variables to find the 
-        # optimal weighting for this set.
-        xstar = ols_from_cov(ve.covar[nz, :][:, nz])
-        x_star = np.zeros(ve.nx)
-        x_star[nz[:-1]] = xstar
-        x_star[-1] = -1
-
-        # Build constraints around the optimal weighting.
-        ve.build_constraints_at_value(cutoff=max_error, problem=problem,
-                                      x_vals=x_star)
-
-        x_star_variance = ve.calc_variance_true(x_star)
-        x_base_variance = ve.calc_variance_true(x_base)
-        print("estimated: " + str(est))
-        print("xbase: " + str(x_base_variance))
-        print("xstar: " + str(x_star_variance))
-        if x_star_variance < best_found:
-            best_found = x_star_variance
-        else:
-            print("objective change")
-            problem.setObjective(cnz)
-
-        new_estimate = ve.calc_estimate_at_point(x_base)
-
-        if (new_estimate+max_error) <= x_star_variance:
-            ve.build_constraints_at_value(cutoff=max_error, problem=problem)
-
-        if bgst >= arb_large*0.5:
-            arb_large = max(bgst*(2.01**0.5), arb_large*1.1)
-            define_non_zero(problem, X, arb_large)
-            print("expanded arb large to " + str(arb_large))
-
-        r = problem.solve()
-        if r == -1:
-            print("Infeasible")
-            break
-        est = ve.variance_estimated
-        bgst = np.max(abs(ve.x[:-1]))
-        
-        
-        print("\ntime: " + str(np.round(time.time()-start_time, 1)))
-        print("\tErr: " + str(np.round(ve.error, 4)))
-
-    print("\tConstraints: " + str(len(problem.constraints)))
-    print("Best: " + str(best_found))
-    return ve, problem, data
-
-def timed_solve(problem):
-    s = time.time()
-    print(problem.solve())
-    print(time.time()-s)
 if __name__ == "__main__":
-    ve, problem, data = test_cnz(n_vars=100, n_select=5, max_error=0.01)
-
-
-
-
-
-
-
-
-
-
-
+    pass
