@@ -7,11 +7,6 @@ import numpy as np
 import pandas as pd
 import pulp
 
-import time
-
-
-
-
 class VarianceConstraints:
 
     """
@@ -155,7 +150,7 @@ class VarianceConstraints:
             A set of constraints that together force the variance estimate
             at the current solution to equal the true variance.
         """
-
+        arb_small = 10**-18
         def remainder_covar(ix_components, vectors, variance_explained):
             """
             Calculate covariance matrix of low error components.
@@ -199,17 +194,19 @@ class VarianceConstraints:
         # fitting below the error cutoff.
         for icomponent in components_to_update:
             component = self.components[icomponent]
-            c = component.add_estimate(component.calc_load(x_vals))
-            new_c.append(c)
-            if problem is not None:
-                problem += c
+            ld = component.calc_load(x_vals)
+            if ld**2 * component.variance_explained > arb_small:
+                c = component.add_estimate(ld)
+                new_c.append(c)
+                if problem is not None:
+                    problem += c
 
         if cutoff is None:
             return new_c
 
         # Identify the set of components whose total error fits under the
         # cutoff.
-        as_single = error_sort[cum_e < cutoff]
+        as_single = error_sort[(cum_e < cutoff) & (e[error_sort] > arb_small)]
 
         # Create a single constraint to estimate the total variance of this
         # set of components.
@@ -218,15 +215,14 @@ class VarianceConstraints:
             expr = sum([self.components[ic].contrib_variable
                        for ic in as_single])
 
-            c = pulp.LpConstraint(expr, sense=1, rhs=-sg)
-
             remainder = remainder_covar(as_single,
                                         self.pca_vectors,
                                         self.pca_variance_explained)
 
-            for ix in self.rx:
-                for ix2 in self.rx:
-                    c.addterm(self.X[ix], -2*self.x[ix2]*remainder[ix, ix2])
+            X2d = np.atleast_2d(np.array(self.X))
+            x2d = np.atleast_2d(x_vals)
+            expr += -2*sum(sum(np.dot(X2d, np.matmul(x2d, remainder).T)))
+            c = pulp.LpConstraint(expr, sense=1, rhs=-sg)
 
             problem += c
             self.remainder_constraints.append(c)
@@ -251,6 +247,9 @@ class VarianceConstraints:
         # Build constraints around the optimal weighting.
         self.build_constraints_at_value(cutoff=cutoff, problem=problem,
                                         x_vals=x_star)
+
+        self.build_constraints_at_value(cutoff=cutoff, problem=problem,
+                                        x_vals=-x_star)
 
         return self.calc_variance_true(x_star), x_star
 
@@ -290,6 +289,12 @@ class VarianceConstraints:
             _constraints += lc
         _constraints += self.remainder_constraints
         return _constraints
+
+    def contributions(self, x=None):
+        contributions = np.zeros(self.nc)
+        for c in self.rc:
+            contributions[c] = self.components[c].calc_contrib(x)
+        return contributions
 
 
 class Component:
@@ -334,7 +339,6 @@ class Component:
         self.rx = range(self.nx)
 
         self.loads = {}
-        self.add_estimate(0)
 
     def add_estimate(self, load):
         c = pulp.LpConstraint(
@@ -349,6 +353,12 @@ class Component:
     def calc_load(self, x):
         xs = np.reshape(x, (1, -1))
         return np.dot(xs, self.vector)[0]
+
+    def calc_contrib(self, x=None):
+        if x is None:
+            x = self.x
+        ld = self.calc_load(x=x)
+        return ld**2 * self.variance_explained
 
     @property
     def x(self):
@@ -375,7 +385,6 @@ class Component:
 
     @property
     def constraints(self):
-
         return self.loads.values()
 
 

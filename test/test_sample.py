@@ -40,6 +40,7 @@ def test_data(n_obs=None, n_vars=None):
     y = y - np.mean(y)
 
     x = x / np.repeat(np.atleast_2d(np.std(x, 1, ddof=1)).T, n_obs, axis=1)
+    x = x
     y = y / np.std(y, ddof=1)
     data = np.concatenate((x, y))
     covar = np.cov(data)
@@ -55,9 +56,9 @@ def timed_solve(problem):
 
 def best_subset(covar, n_select, max_time=300, constraint_cutoff=10**-8,
                 print_iter=False):
-    arb_large = 1/n_select
 
     nx = covar.shape[0]
+    arb_large = 1 / nx
     X = [pulp.LpVariable("x_"+str(i)) for i in range(nx)]
 
     problem = pulp.LpProblem("best_subset")
@@ -101,12 +102,16 @@ def best_subset(covar, n_select, max_time=300, constraint_cutoff=10**-8,
     define_non_zero(problem, X, arb_large)
     ve = VarianceConstraints(covar, variance_variable, X)
 
+    # TODO: find a systematic way to determine pre-solve cuts
+    # TODO: find a systematic way to tune constraint_cutoff
     y_alone = np.zeros((nx))
     y_alone[-1] = 1
+    for factor in [2, 1, 0.5, 0.25, 0.125]:
+        for sign in [1, -1]:
 
-    ve.build_constraints_at_value(cutoff=constraint_cutoff/2,
-                                  x_vals=y_alone,
-                                  problem=problem)
+            ve.build_constraints_at_value(cutoff=None,
+                                          x_vals=y_alone*factor*sign,
+                                          problem=problem)
 
     for c in ve.constraints:
         problem += c
@@ -133,6 +138,10 @@ def best_subset(covar, n_select, max_time=300, constraint_cutoff=10**-8,
         ve.build_constraints_at_value(cutoff=constraint_cutoff,
                                       problem=problem)
 
+        ve.build_constraints_at_value(cutoff=constraint_cutoff,
+                                      problem=problem,
+                                      x_vals=-ve.x)
+
         iteration_summary['x_star_variance'], x_star = \
             ve.build_constraints_at_subset_regression(
                                             cutoff=constraint_cutoff,
@@ -140,6 +149,7 @@ def best_subset(covar, n_select, max_time=300, constraint_cutoff=10**-8,
 
         max_abs_xstar = max(abs(x_star[:-1]))
 
+        # TODO: find a better tuning strategy for arb_large
         arb_large = (max_abs_xstar + max_abs_x) / 2 * 1.1
         define_non_zero(problem, X, arb_large)
 
@@ -147,20 +157,20 @@ def best_subset(covar, n_select, max_time=300, constraint_cutoff=10**-8,
         iteration_summary['max_abs_x'] = max_abs_x
 
         if print_iter:
-            print(iteration_summary)
+            print(iteration)
+            for k in iteration_summary:
+                print("\t"+k+": " + str(np.round(iteration_summary[k], 4)))
+
         iteration += 1
     summary = pd.DataFrame(summary).T
     return ve, problem, summary
 
 
 if __name__ == "__main__":
-    problems = [
-            {'n_vars': 10, 'n_select': 2, 'max_time': 10},
-            {'n_vars': 30, 'n_select': 5, 'max_time': 60},
-            {'n_vars': 50, 'n_select': 10, 'max_time': 180}]
+    problems = [{'n_vars': 30, 'n_select': 5, 'max_time': 60}]
 
     summaries = []
-
+    constraint_cutoff = 10**-15
     plotfields = [
                 ['estimate', 'r', 'estimate'],
                 ['solution_true_variance', 'k', 'solution true'],
@@ -168,7 +178,9 @@ if __name__ == "__main__":
 
     for params in problems:
         covar = test_data(n_vars=params['n_vars'])
-        ve, problem, summary = best_subset(covar, n_select=params['n_select'],
+        ve, problem, summary = best_subset(covar,
+                                           constraint_cutoff=constraint_cutoff,
+                                           n_select=params['n_select'],
                                            max_time=params['max_time'],
                                            print_iter=True)
 
@@ -176,13 +188,12 @@ if __name__ == "__main__":
         ax.set_title(str(params))
         for series in plotfields:
 
-            summary.iloc[1:, :].plot.scatter(
+            summary.plot.scatter(
                     x='cumulative_time',
                     y=series[0], color=series[1],
                     label=series[2], ax=ax)
 
         ax.legend()
         ax.set_ylabel('Variance')
-        fig.show()
 
         summaries.append(summary)
