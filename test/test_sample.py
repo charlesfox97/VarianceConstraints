@@ -68,38 +68,58 @@ def best_subset(covar, n_select, max_time=300, constraint_cutoff=10**-8,
     problem += pulp.LpConstraint(variance_variable, sense=-1, rhs=1,
                                  name="variance_cap")
 
-    cnz = pulp.LpVariable("count_non_zero")
     problem.setObjective(variance_variable)
+
+    cnz = pulp.LpVariable("count_non_zero")
     problem += pulp.LpConstraint(cnz, sense=-1, rhs=n_select,
                                  name="count_non_zero_cap")
-
     def_cnz = pulp.LpConstraint(cnz, sense=1, name="def_count_non_zero")
-    problem += def_cnz
+
+    ta = pulp.LpVariable("total_abs_x")
+    def_ta = pulp.LpConstraint(ta, sense=0, name="def_total_abs_x")
+    cap_total = n_select*arb_large
+    problem += pulp.LpConstraint(ta, sense=-1, rhs=n_select*arb_large,
+                                 name="total_abs_x_cap")
 
     for ix in range(nx-1):
         six = str(ix)
-        xnz = pulp.LpVariable("X_non_zero_" + six,
+
+        xnz = pulp.LpVariable("non_zero_" + six,
                               cat="Integer", lowBound=0, upBound=1)
+
+        pos = pulp.LpVariable("pos_part_"+six, lowBound=0)
+        neg = pulp.LpVariable("neg_part_"+six, lowBound=0)
+        abs_x = pulp.LpVariable("abs_" + six)
+
+        problem += pulp.LpConstraint(pos+neg-abs_x)
+        problem += pulp.LpConstraint(X[ix] - pos + neg)
+
         def_cnz.addterm(xnz, -1)
+        def_ta.addterm(abs_x, -1)
 
-    def define_non_zero(problem, X, arb_large):
-        pvd = problem.variablesDict()
+    problem += def_cnz
+    problem += def_ta
 
+    def define_non_zero(problem, X, arb_large, pvd):
         for ix in range(len(X)-1):
             six = str(ix)
+            xnz = pvd["non_zero_" + six]
+            pos = pvd["pos_part_" + six]
+            neg = pvd["neg_part_"+six]
 
-            if "xp_" + six in problem.constraints:
-                problem.constraints.pop("xp_"+six)
+            xpdn = "xp_"+six
+            if xpdn in problem.constraints:
+                problem.constraints.pop(xpdn)
                 problem.constraints.pop("xn_"+six)
 
-            xnz = pvd["X_non_zero_"+six]
-            problem += pulp.LpConstraint(xnz*arb_large - X[ix],
-                                         sense=1, name="xp_"+six)
+            problem += pulp.LpConstraint(xnz*arb_large - pos,
+                                         sense=1, name=xpdn)
 
-            problem += pulp.LpConstraint(-xnz*arb_large - X[ix],
-                                         sense=-1, name="xn_"+six)
+            problem += pulp.LpConstraint(xnz*arb_large - neg,
+                                         sense=1, name="xn_"+six)
 
-    define_non_zero(problem, X, arb_large)
+    pvd = problem.variablesDict()
+    define_non_zero(problem, X, arb_large, pvd)
     ve = VarianceConstraints(covar, variance_variable, X)
 
     # TODO: find a systematic way to determine pre-solve cuts
@@ -107,18 +127,20 @@ def best_subset(covar, n_select, max_time=300, constraint_cutoff=10**-8,
     y_alone = np.zeros((nx))
     y_alone[-1] = 1
     for factor in [2, 1, 0.5, 0.25, 0.125]:
-        for sign in [1, -1]:
 
-            ve.build_constraints_at_value(cutoff=None,
-                                          x_vals=y_alone*factor*sign,
-                                          problem=problem)
+        ve.build_constraints_at_value(cutoff=None,
+                                      x_vals=y_alone*factor,
+                                      problem=problem,
+                                      symmetric=True)
 
     for c in ve.constraints:
         problem += c
 
     start_time = time.time()
-    iteration = 0
+    iteration = 1
     summary = {}
+    best = {'var': 1, 'x': y_alone, 'iteration': 0}
+
     while (time.time()-start_time) < max_time:
         iteration_summary = {}
         summary[iteration] = iteration_summary
@@ -129,29 +151,46 @@ def best_subset(covar, n_select, max_time=300, constraint_cutoff=10**-8,
         iteration_summary['cumulative_time'] = time.time()-start_time
         if result == -1:
             print("Infeasible")
+            print(problem.constraints['variance_cap'])
+            print(problem.constraints['total_abs_x_cap'])
+            print(problem.constraints["xp_0"])
             break
+        if not(result == 1):
+            print("Unexpected result")
+            print(result)
+            raise
 
-        max_abs_x = max(abs(ve.x[:-1]))
+        max_abs_x = float(max(abs(ve.x[:-1])))
         iteration_summary['estimate'] = problem.objective.value()
         iteration_summary['solution_true_variance'] = ve.variance_true
 
         ve.build_constraints_at_value(cutoff=constraint_cutoff,
-                                      problem=problem)
-
-        ve.build_constraints_at_value(cutoff=constraint_cutoff,
                                       problem=problem,
-                                      x_vals=-ve.x)
+                                      symmetric=True)
 
         iteration_summary['x_star_variance'], x_star = \
             ve.build_constraints_at_subset_regression(
                                             cutoff=constraint_cutoff,
                                             problem=problem)
 
-        max_abs_xstar = max(abs(x_star[:-1]))
+        max_abs_xstar = float(max(abs(x_star[:-1])))
+        if iteration_summary['x_star_variance'] < best['var']:
+            best['var'] = iteration_summary['x_star_variance']
+            best['x'] = x_star
+            best['iteration'] = iteration
+            print("new_best")
+        elif iteration_summary['estimate'] >= best['var']:
+            print("estimate was not better than best")
 
-        # TODO: find a better tuning strategy for arb_large
-        arb_large = (max_abs_xstar + max_abs_x) / 2 * 1.1
-        define_non_zero(problem, X, arb_large)
+            # TODO: find a better tuning strategy for arb_large
+            arb_large *= 2
+            cap_total *= 2
+
+            problem.constraints['total_abs_x_cap'].changeRHS(cap_total)
+
+            define_non_zero(problem, X, arb_large, pvd)
+        else:
+            print("Not improved, but estimate was lower than best found")
 
         iteration_summary['max_abs_xstar'] = max_abs_xstar
         iteration_summary['max_abs_x'] = max_abs_x
@@ -167,10 +206,11 @@ def best_subset(covar, n_select, max_time=300, constraint_cutoff=10**-8,
 
 
 if __name__ == "__main__":
-    problems = [{'n_vars': 30, 'n_select': 5, 'max_time': 60}]
+    problems = [{'n_vars': 50, 'n_select': 15, 'max_time': 30}]
 
     summaries = []
-    constraint_cutoff = 10**-15
+    #  Todo: I'm not sure how to tune this parameter
+    constraint_cutoff = 10**-10
     plotfields = [
                 ['estimate', 'r', 'estimate'],
                 ['solution_true_variance', 'k', 'solution true'],

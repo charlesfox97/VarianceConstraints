@@ -4,8 +4,8 @@ This module creates linear estimates of variance as PuLP constriants.
 """
 
 import numpy as np
-import pandas as pd
 import pulp
+
 
 class VarianceConstraints:
 
@@ -50,7 +50,7 @@ class VarianceConstraints:
 
         self.covar = covar
         self.variance_variable = variance_variable
-        self.X = X
+        self.X = np.atleast_2d(np.array(X)).T
 
         # covariance -> principal components
         self.pca_variance_explained, self.pca_vectors = decompose(covar)
@@ -80,11 +80,15 @@ class VarianceConstraints:
         self.remainder_constraints = []
         self.remainder_covars = []
 
+        def get_value(X):
+            return X.value()
+        self.fvx = np.vectorize(get_value)
+
     def calc_variance_true(self, x_vals):
         x = np.atleast_2d(x_vals)
         return float(np.matmul(x, np.matmul(self.covar, x.T)))
 
-    def calc_estimate_at_point(self, x_vals=None):
+    def solve_to_estimate(self, x_vals=None):
         """Estimates variance using the current set of constraints.
 
         Parameters
@@ -115,7 +119,7 @@ class VarianceConstraints:
         # Constraint all X variables to be equal to their corresponding
         # value in x_vals
         for ix in self.rx:
-            problem += pulp.LpConstraint(self.X[ix], rhs=x_vals[ix])
+            problem += pulp.LpConstraint(self.X[ix][0], rhs=x_vals[ix])
 
         # Because X[i]==x[i] for all i, only the contribution variables may
         # be optimized.
@@ -124,8 +128,20 @@ class VarianceConstraints:
         # The objective is the estimate of variance.
         return problem.objective.value()
 
+    def calc_estimate(self, x_vals=None):
+        x_vals = self.x if x_vals is None else x_vals
+        estimates = [self.components[ic].calc_contrib_estimated(x_vals)
+                     for ic in self.rc]
+        return sum(estimates)
+
+    def calc_errors(self, x=None):
+        x = self.x if x is None else x
+        errors = [self.components[ic].calc_error(x)
+                  for ic in self.rc]
+        return np.array(errors)
+
     def build_constraints_at_value(self, cutoff=None, problem=None,
-                                   x_vals=None):
+                                   x_vals=None, symmetric=False):
         """Creates new constraints for variance estimation.
 
         Components are sorted by contribution to error.  If the total
@@ -151,6 +167,7 @@ class VarianceConstraints:
             at the current solution to equal the true variance.
         """
         arb_small = 10**-18
+
         def remainder_covar(ix_components, vectors, variance_explained):
             """
             Calculate covariance matrix of low error components.
@@ -172,11 +189,7 @@ class VarianceConstraints:
             e = np.diag(variance_explained[ix_components, 0])
             return np.matmul(v, np.matmul(e, v.T))
 
-        if (x_vals is not None) and (cutoff is not None):
-            self.calc_estimate_at_point(x_vals)
-
-        if x_vals is None:
-            x_vals = self.x
+        x = self.x if x_vals is None else x_vals
 
         new_c = []
         # If no cutoff is given, create one constraint per component without
@@ -185,8 +198,10 @@ class VarianceConstraints:
             components_to_update = self.rc
         else:
             # Sort the errors, identify which components get a new constraint.
-            e = self.errors
+            e = self.calc_errors(x)
+
             error_sort = np.argsort(e)
+
             cum_e = np.cumsum(e[error_sort])
             components_to_update = error_sort[cum_e >= cutoff]
 
@@ -194,13 +209,24 @@ class VarianceConstraints:
         # fitting below the error cutoff.
         for icomponent in components_to_update:
             component = self.components[icomponent]
-            ld = component.calc_load(x_vals)
+            ld = component.calc_load(x)
             if ld**2 * component.variance_explained > arb_small:
                 c = component.add_estimate(ld)
                 new_c.append(c)
-                if problem is not None:
-                    problem += c
+                if symmetric:
+                    c = component.add_estimate(-ld)
+                    new_c.append(c)
+            else:
+                if len(component.load_points) == 0:
+                    c = component.add_estimate(0)
+                    new_c.append(c)
 
+        def cat_all(problem,new_c):
+            if problem is not None:
+                for c in new_c:
+                    problem.addConstraint(c)
+
+        cat_all(problem,new_c)
         if cutoff is None:
             return new_c
 
@@ -219,9 +245,8 @@ class VarianceConstraints:
                                         self.pca_vectors,
                                         self.pca_variance_explained)
 
-            X2d = np.atleast_2d(np.array(self.X))
-            x2d = np.atleast_2d(x_vals)
-            expr += -2*sum(sum(np.dot(X2d, np.matmul(x2d, remainder).T)))
+
+            expr += -2*np.matmul(x.T,np.matmul(remainder,self.X))
             c = pulp.LpConstraint(expr, sense=1, rhs=-sg)
 
             problem += c
@@ -246,10 +271,8 @@ class VarianceConstraints:
 
         # Build constraints around the optimal weighting.
         self.build_constraints_at_value(cutoff=cutoff, problem=problem,
-                                        x_vals=x_star)
-
-        self.build_constraints_at_value(cutoff=cutoff, problem=problem,
-                                        x_vals=-x_star)
+                                        x_vals=x_star,
+                                        symmetric=True)
 
         return self.calc_variance_true(x_star), x_star
 
@@ -259,8 +282,8 @@ class VarianceConstraints:
 
     @property
     def variance_true(self):
-        x = np.atleast_2d(self.x)
-        return float(np.matmul(x, np.matmul(self.covar, x.T)))
+        x = self.x
+        return float(np.matmul(x.T, np.matmul(self.covar, x)))
 
     @property
     def errors(self):
@@ -275,10 +298,7 @@ class VarianceConstraints:
 
     @property
     def x(self):
-        _x = np.zeros(self.nx)
-        for ix in self.rx:
-            _x[ix] = self.X[ix].value()
-        return _x
+        return self.fvx(self.X)
 
     @property
     def constraints(self):
@@ -297,6 +317,7 @@ class VarianceConstraints:
         return contributions
 
 
+
 class Component:
     """The Component class is used to estimate the contribution to variance
     from a single PCA component.
@@ -313,7 +334,7 @@ class Component:
     def __init__(self,
                  variance_explained: float,
                  vector: np.ndarray,
-                 X: list,
+                 X,
                  number: int):
         """
         Parameters:
@@ -332,40 +353,53 @@ class Component:
         self.contrib_variable = pulp.LpVariable("component_contrib_"+sn)
 
         self.variance_explained = variance_explained
-        self.vector = vector
+        self.vector = np.atleast_2d(vector)
 
-        self.X = X
+        self.X = np.atleast_2d(X).T
+        self.vX = np.dot(self.vector,self.X)
         self.nx = len(X)
         self.rx = range(self.nx)
 
         self.loads = {}
+        self.load_points = np.array([])
+
+        def get_value(X):
+            return X.value()
+        self.fvx = np.vectorize(get_value)
 
     def add_estimate(self, load):
         c = pulp.LpConstraint(
                 self.contrib_variable -
-                2*self.variance_explained*load*(
-                    sum([self.vector[ix]*self.X[ix] for ix in self.rx])),
+                2*self.variance_explained*load*self.vX,
                 rhs=-load**2*self.variance_explained, sense=1)
-
+        # sum([self.vector[ix]*self.X[ix] for ix in self.rx])),
         self.loads[load] = c
+        self.load_points = np.append(self.load_points,load)
         return c
 
     def calc_load(self, x):
-        xs = np.reshape(x, (1, -1))
-        return np.dot(xs, self.vector)[0]
+        return float(np.matmul(self.vector, x))
+
+    def calc_contrib_estimated(self, x=None):
+        x = self.x if x is None else x
+        load = self.calc_load(x)
+        ld_pts = self.load_points
+        load_sqd_est = ld_pts**2 + 2*(load - ld_pts)*ld_pts
+        load_sqd_est = np.max(load_sqd_est)
+        return load_sqd_est*self.variance_explained
 
     def calc_contrib(self, x=None):
-        if x is None:
-            x = self.x
+        x = self.x if x is None else x
         ld = self.calc_load(x=x)
         return ld**2 * self.variance_explained
 
+    def calc_error(self, x=None):
+        x = self.x if x is None else x
+        return self.calc_contrib(x) - self.calc_contrib_estimated(x)
+
     @property
     def x(self):
-        _x = np.zeros(self.nx)
-        for ix in self.rx:
-            _x[ix] = self.X[ix].value()
-        return _x
+        return self.fvx(self.X)
 
     @property
     def contrib_estimated(self):
